@@ -1,4 +1,4 @@
-"""AI Agent — optimized for maximum cosine & Jaccard similarity scoring."""
+"""Cherry AI Agent — powered by Groq (free + ultra-fast)."""
 
 import os
 import httpx
@@ -7,9 +7,9 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-MODEL = "claude-sonnet-4-20250514"
-API_URL = "https://api.anthropic.com/v1/messages"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+MODEL = "llama-3.3-70b-versatile"
+API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 SYSTEM_PROMPT = """You are a precise answering agent being scored on exact text similarity against a reference answer.
 
@@ -64,8 +64,8 @@ async def fetch_asset(url: str) -> str:
         return f"[Failed to fetch {url}: {e}]"
 
 
-async def ask_claude(query: str, asset_context: str = "") -> str:
-    """Send query to Claude and return the answer."""
+async def ask_llm(query: str, asset_context: str = "") -> str:
+    """Send query to Groq and return the answer."""
 
     if asset_context and asset_context.strip():
         user_content = (
@@ -79,16 +79,17 @@ async def ask_claude(query: str, asset_context: str = "") -> str:
 
     headers = {
         "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
     }
 
     payload = {
         "model": MODEL,
-        "max_tokens": 1024,
         "temperature": 0,
-        "system": SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_content}],
+        "max_tokens": 512,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -96,17 +97,16 @@ async def ask_claude(query: str, asset_context: str = "") -> str:
         resp.raise_for_status()
         data = resp.json()
 
-    answer = "".join(
-        block["text"] for block in data.get("content", []) if block.get("type") == "text"
-    ).strip()
+    answer = data["choices"][0]["message"]["content"].strip()
 
     # Clean up stray quotes or markdown
     answer = answer.strip('"').strip("'").strip("`")
 
-    # Remove common LLM preambles that hurt similarity
+    # Remove common LLM preambles that destroy similarity scores
     for prefix in [
         "Sure! ", "Sure, ", "Well, ", "Certainly! ",
         "Of course! ", "Here's the answer: ", "Answer: ",
+        "Here is the answer: ", "The answer is: ",
     ]:
         if answer.startswith(prefix):
             answer = answer[len(prefix):]
@@ -127,14 +127,14 @@ async def answer(request: AgentRequest) -> AgentResponse:
                 parts.append(content)
             asset_context = "\n\n".join(parts)
 
-        # Get answer from Claude
-        result = await ask_claude(request.query, asset_context)
+        # Get answer from LLM
+        result = await ask_llm(request.query, asset_context)
         return AgentResponse(answer=result)
 
     except Exception as e:
-        return AgentResponse(answer=f"Error processing request: {str(e)}")
+        return AgentResponse(answer=f"Error: {str(e)}")
 
 
 @app.get("/")
 async def health():
-    return {"status": "ok", "service": "ai-agent"}
+    return {"status": "ok", "service": "cherry-ai-agent"}
