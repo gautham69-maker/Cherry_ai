@@ -1,7 +1,7 @@
 services:
   - type: web
-    name: ai-agent
+    name: cherry-ai-agent
     runtime: docker
     envVars:
-      - key: ANTHROPIC_API_KEY
+      - key: GROQ_API_KEY
         sync: false
