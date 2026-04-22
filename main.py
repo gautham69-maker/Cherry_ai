@@ -2,14 +2,15 @@
 
 import os
 import httpx
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from pydantic import BaseModel
-
-app = FastAPI()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 MODEL = "llama-3.3-70b-versatile"
 API_URL = "https://api.groq.com/openai/v1/chat/completions"
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
 SYSTEM_PROMPT = """You are a precise answering agent being scored on exact text similarity against a reference answer.
 
@@ -34,9 +35,33 @@ KEY PRINCIPLES:
 - Be PRECISE — match the natural phrasing a human would expect.
 - Be COMPLETE — don't omit key information from the answer.
 - Use PROVIDED CONTEXT from assets when available — the answer is usually IN the assets.
-- If assets contain the answer, extract and restate it cleanly. Do not add information beyond what's in the assets.
+- If assets contain the answer, extract and restate it cleanly.
 - NEVER refuse to answer. Always give your best answer.
 """
+
+
+# ── Keep-alive: ping self every 10 minutes so Render never sleeps ──
+async def keep_alive():
+    """Ping self every 10 min to prevent Render free tier from sleeping."""
+    while True:
+        await asyncio.sleep(600)  # 10 minutes
+        try:
+            if RENDER_URL:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await client.get(f"{RENDER_URL}/")
+        except Exception:
+            pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start keep-alive background task
+    task = asyncio.create_task(keep_alive())
+    yield
+    task.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 class AgentRequest(BaseModel):
@@ -92,7 +117,7 @@ async def ask_llm(query: str, asset_context: str = "") -> str:
         ],
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=25) as client:
         resp = await client.post(API_URL, headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()
