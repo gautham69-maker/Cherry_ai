@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: ai-agent
+    runtime: docker
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
