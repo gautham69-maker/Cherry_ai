@@ -1,6 +1,7 @@
-"""Cherry AI Agent — powered by Groq (free + ultra-fast)."""
+"""Cherry AI Agent — optimized for maximum cosine similarity."""
 
 import os
+import re
 import httpx
 import asyncio
 from contextlib import asynccontextmanager
@@ -12,39 +13,40 @@ MODEL = "llama-3.3-70b-versatile"
 API_URL = "https://api.groq.com/openai/v1/chat/completions"
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
-SYSTEM_PROMPT = """You are a precise answering agent being scored on exact text similarity against a reference answer.
+SYSTEM_PROMPT = """You are a question-answering agent. Your answers are evaluated using cosine similarity against a reference answer.
 
-CRITICAL RULES — follow every single one:
-1. Answer DIRECTLY. No preamble like "Sure!", "Great question!", "Let me think...". Just the answer.
-2. Do NOT add disclaimers, caveats, or "I think" / "I believe" / "It seems".
-3. Do NOT add extra explanation beyond what's asked.
-4. End with a period. One sentence when possible.
-5. Use natural, clean English — not robotic, not verbose.
+ABSOLUTE RULES:
+1. Output ONLY the answer — nothing else.
+2. No greetings, no preamble, no "Sure!", no "Here's", no "I think".
+3. No markdown formatting, no bullet points, no numbered lists.
+4. Give a complete, natural, single-paragraph answer.
+5. Do NOT over-explain. Do NOT under-explain. Match what a knowledgeable human would say.
 
-ANSWER PATTERNS — match these exactly:
-- Math: "What is 10 + 15?" → "The sum is 25."
-- Math: "What is 20 * 3?" → "The product is 60."
-- Math: "What is 100 / 4?" → "The result is 25."
-- Factual: "What is the capital of France?" → "The capital of France is Paris."
-- Definition: "What is photosynthesis?" → "Photosynthesis is the process by which plants convert sunlight into energy."
-- Yes/No: "Is the sky blue?" → "Yes, the sky is blue."
-- List: "Name 3 colors" → "Three colors are red, blue, and green."
+FOR MATH QUESTIONS:
+- "What is 10 + 15?" → "The sum is 25."
+- Show the computation naturally. State the result.
 
-KEY PRINCIPLES:
-- Be CONCISE — every extra word hurts your similarity score.
-- Be PRECISE — match the natural phrasing a human would expect.
-- Be COMPLETE — don't omit key information from the answer.
-- Use PROVIDED CONTEXT from assets when available — the answer is usually IN the assets.
-- If assets contain the answer, extract and restate it cleanly.
-- NEVER refuse to answer. Always give your best answer.
-"""
+FOR FACTUAL QUESTIONS:
+- Give a clear, accurate, concise answer in 1-3 sentences.
+- Include key facts but no filler words.
+
+FOR QUESTIONS WITH CONTEXT/ASSETS:
+- The answer is IN the provided context. Extract it directly.
+- Restate the relevant information from the context cleanly.
+- Do NOT add information that isn't in the context.
+- Do NOT say "based on the context" or "according to the provided information".
+
+FOR EXPLANATIONS:
+- Give a clear, concise explanation in 2-4 sentences.
+- Cover the key points without rambling.
+
+CRITICAL: Your goal is to match the reference answer as closely as possible in meaning and word choice. Be natural, precise, and complete."""
 
 
-# ── Keep-alive: ping self every 10 minutes so Render never sleeps ──
+# ── Keep-alive ──
 async def keep_alive():
-    """Ping self every 10 min to prevent Render free tier from sleeping."""
     while True:
-        await asyncio.sleep(600)  # 10 minutes
+        await asyncio.sleep(600)
         try:
             if RENDER_URL:
                 async with httpx.AsyncClient(timeout=10) as client:
@@ -55,7 +57,6 @@ async def keep_alive():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start keep-alive background task
     task = asyncio.create_task(keep_alive())
     yield
     task.cancel()
@@ -80,11 +81,14 @@ async def fetch_asset(url: str) -> str:
             resp = await client.get(url)
             resp.raise_for_status()
             content_type = resp.headers.get("content-type", "")
-            if "text" in content_type or "json" in content_type or "csv" in content_type:
-                return resp.text[:8000]
-            elif "pdf" in content_type:
-                return f"[PDF document from {url}]"
-            return f"[Binary file: {content_type}]"
+            # Try to read as text regardless
+            try:
+                text = resp.text
+                if text and len(text.strip()) > 0:
+                    return text[:10000]
+            except Exception:
+                pass
+            return f"[Could not read content from {url}]"
     except Exception as e:
         return f"[Failed to fetch {url}: {e}]"
 
@@ -94,13 +98,13 @@ async def ask_llm(query: str, asset_context: str = "") -> str:
 
     if asset_context and asset_context.strip():
         user_content = (
-            f"Use the following context to answer the question. "
-            f"The answer should be based on this context.\n\n"
-            f"CONTEXT:\n{asset_context}\n\n"
-            f"QUESTION: {query}"
+            f"Context:\n{asset_context}\n\n"
+            f"Question: {query}\n\n"
+            f"Answer the question using the context above. "
+            f"Output only the answer, nothing else."
         )
     else:
-        user_content = query
+        user_content = f"Question: {query}\n\nOutput only the answer, nothing else."
 
     headers = {
         "Content-Type": "application/json",
@@ -110,7 +114,7 @@ async def ask_llm(query: str, asset_context: str = "") -> str:
     payload = {
         "model": MODEL,
         "temperature": 0,
-        "max_tokens": 512,
+        "max_tokens": 1024,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
@@ -124,17 +128,24 @@ async def ask_llm(query: str, asset_context: str = "") -> str:
 
     answer = data["choices"][0]["message"]["content"].strip()
 
-    # Clean up stray quotes or markdown
+    # Clean up artifacts
     answer = answer.strip('"').strip("'").strip("`")
-
-    # Remove common LLM preambles that destroy similarity scores
+    
+    # Remove markdown bold/italic
+    answer = re.sub(r'\*\*(.*?)\*\*', r'\1', answer)
+    answer = re.sub(r'\*(.*?)\*', r'\1', answer)
+    
+    # Remove leading "Answer: " or similar
     for prefix in [
-        "Sure! ", "Sure, ", "Well, ", "Certainly! ",
-        "Of course! ", "Here's the answer: ", "Answer: ",
-        "Here is the answer: ", "The answer is: ",
+        "Sure! ", "Sure, ", "Well, ", "Certainly! ", "Of course! ",
+        "Here's the answer: ", "Answer: ", "Here is the answer: ",
+        "The answer is: ", "Response: ", "Output: ",
     ]:
-        if answer.startswith(prefix):
+        if answer.lower().startswith(prefix.lower()):
             answer = answer[len(prefix):]
+
+    # Remove trailing whitespace/newlines
+    answer = answer.strip()
 
     return answer
 
@@ -143,14 +154,12 @@ async def ask_llm(query: str, asset_context: str = "") -> str:
 async def answer(request: AgentRequest) -> AgentResponse:
     """Main endpoint — receives a query, returns an answer."""
     try:
-        # Fetch assets if provided
+        # Fetch all assets in parallel
         asset_context = ""
         if request.assets:
-            parts = []
-            for url in request.assets:
-                content = await fetch_asset(url)
-                parts.append(content)
-            asset_context = "\n\n".join(parts)
+            tasks = [fetch_asset(url) for url in request.assets]
+            results = await asyncio.gather(*tasks)
+            asset_context = "\n\n".join(results)
 
         # Get answer from LLM
         result = await ask_llm(request.query, asset_context)
